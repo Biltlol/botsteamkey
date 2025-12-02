@@ -584,7 +584,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Используйте /start для открытия главного меню."
         )
 
-async def main():
+def main():
     """Запуск бота"""
     if not BOT_TOKEN or not EMAIL_ADDRESS or not EMAIL_PASSWORD:
         print("❌ Ошибка: Не заданы переменные окружения!")
@@ -603,7 +603,7 @@ async def main():
     print(f"📧 Email: {EMAIL_ADDRESS}")
     print(f"🌤️ Weather API: {'✅ Настроен' if WEATHER_API_KEY else '❌ Не настроен'}")
     
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
