@@ -5,6 +5,7 @@ import email
 import asyncio
 import random
 import aiohttp
+import json
 from email.header import decode_header
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,13 +16,14 @@ from bs4 import BeautifulSoup
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS')
 EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD')
-WEATHER_API_KEY = os.environ.get('WEATHER_API_KEY')  # OpenWeatherMap API
-STEAM_API_KEY = os.environ.get('STEAM_API_KEY', '')  # Опционально
+WEATHER_API_KEY = os.environ.get('WEATHER_API_KEY')
+STEAM_API_KEY = os.environ.get('STEAM_API_KEY', '')
 CORRECT_PASSWORD = "N55epe7red67av48ai8poroli"
 
 # Хранилище
 authorized_users = set()
 user_server_page = {}
+user_configs = {}  # Хранение конфигов пользователей
 
 def check_steam_email():
     """Проверяет почту на наличие кодов от Steam"""
@@ -81,107 +83,70 @@ def check_steam_email():
         print(f"Ошибка при проверке почты: {e}")
         return None
 
-async def get_hvh_servers():
-    """Парсит HvH сервера с monwave.ru"""
+async def get_hvh_servers_from_api():
+    """Получает сервера через различные API"""
+    servers = []
+    
+    # Попытка 1: Steam API (если есть ключ)
+    if STEAM_API_KEY:
+        try:
+            url = f"https://api.steampowered.com/IGameServersService/GetServerList/v1/?key={STEAM_API_KEY}&filter=\\appid\\730\\gametype\\hvh"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if 'response' in data and 'servers' in data['response']:
+                            for srv in data['response']['servers'][:20]:
+                                servers.append({
+                                    "name": srv.get('name', 'Unknown Server'),
+                                    "ip": srv.get('addr', '0.0.0.0:0'),
+                                    "players": f"{srv.get('players', 0)}/{srv.get('max_players', 0)}",
+                                    "map": srv.get('map', 'unknown'),
+                                    "game": srv.get('gametype', '')
+                                })
+                            if servers:
+                                return servers
+        except Exception as e:
+            print(f"Steam API error: {e}")
+    
+    # Попытка 2: Battlemetrics API
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
-        }
-        
-        url = "https://monwave.ru/cs2/servers/tag/hvh"
-        
+        url = "https://api.battlemetrics.com/servers?filter[game]=cs2&filter[search]=hvh&page[size]=20"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
-                if response.status != 200:
-                    print(f"Monwave вернул статус {response.status}")
-                    return get_fallback_servers()
-                
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                servers = []
-                
-                # Ищем таблицу или список серверов
-                # Возможные варианты структуры
-                server_rows = (
-                    soup.find_all('tr', class_=re.compile(r'server|row')) or
-                    soup.find_all('div', class_=re.compile(r'server-item|server-row|server-card')) or
-                    soup.find_all('a', href=re.compile(r'/cs2/servers/\d+\.\d+\.\d+\.\d+'))
-                )
-                
-                print(f"Найдено элементов серверов: {len(server_rows)}")
-                
-                for row in server_rows[:30]:
-                    try:
-                        # Извлекаем текст из элемента
-                        text_content = row.get_text(separator=' ', strip=True)
-                        
-                        # Ищем название сервера
-                        name = None
-                        name_elem = (
-                            row.find('td', class_=re.compile(r'name|title|hostname')) or
-                            row.find('div', class_=re.compile(r'name|title')) or
-                            row.find('span', class_=re.compile(r'name|title'))
-                        )
-                        
-                        if name_elem:
-                            name = name_elem.get_text(strip=True)
-                        elif len(text_content) > 10:
-                            # Берём первые 50 символов как название
-                            name = text_content[:50]
-                        
-                        if not name or len(name) < 5:
-                            continue
-                        
-                        # Ищем количество игроков (формат X/Y)
-                        players_match = re.search(r'(\d+)\s*/\s*(\d+)', text_content)
-                        players = f"{players_match.group(1)}/{players_match.group(2)}" if players_match else "?/?"
-                        
-                        # Ищем карту (начинается с de_ или cs_)
-                        map_match = re.search(r'(de_\w+|cs_\w+)', text_content, re.IGNORECASE)
-                        map_name = map_match.group(1) if map_match else "Unknown"
-                        
-                        servers.append({
-                            "name": f"🎮 {name.strip()[:60]}",
-                            "players": players,
-                            "map": map_name
-                        })
-                        
-                    except Exception as e:
-                        print(f"Ошибка парсинга строки: {e}")
-                        continue
-                
-                if len(servers) >= 3:
-                    print(f"Успешно спарсено {len(servers)} серверов")
-                    return servers
-                else:
-                    print(f"Мало серверов ({len(servers)}), используем резервные")
-                    return get_fallback_servers()
-                
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if 'data' in data:
+                        for srv in data['data']:
+                            attrs = srv.get('attributes', {})
+                            servers.append({
+                                "name": attrs.get('name', 'Unknown Server'),
+                                "ip": attrs.get('ip', '0.0.0.0') + ':' + str(attrs.get('port', '0')),
+                                "players": f"{attrs.get('players', 0)}/{attrs.get('maxPlayers', 0)}",
+                                "map": attrs.get('details', {}).get('map', 'unknown'),
+                                "game": "CS2 HvH"
+                            })
+                        if servers:
+                            return servers
     except Exception as e:
-        print(f"Ошибка парсинга Monwave: {e}")
-        return get_fallback_servers()
+        print(f"Battlemetrics API error: {e}")
+    
+    # Fallback: Возвращаем статичные популярные сервера
+    return get_fallback_servers()
 
 def get_fallback_servers():
-    """Резервные HvH сервера (актуальные на момент обновления)"""
+    """Резервные HvH сервера"""
     return [
-        {"name": "🇺🇸 [NA | CHICAGO] CS2HVHSERVERS.COM [SCOUT]", "players": "8/64", "map": "de_mirage"},
-        {"name": "🇺🇸 [NA | EAST] CS2HVHSERVERS.COM [SCOUT #2]", "players": "6/64", "map": "de_dust2"},  
-        {"name": "🇪🇺 [EU] CS2HVHSERVERS.COM [MIRAGE] NO AWP", "players": "8/64", "map": "de_mirage"},
-        {"name": "🇨🇳 [CN] Flux HvH™ | 鸟泊爆头服", "players": "6/24", "map": "de_dust2"},
-        {"name": "🇨🇳 [CN] Flux HvH™ | 混战陪服 | 平衡Ping", "players": "14/24", "map": "de_dust2"},
-        {"name": "🇷🇺 [RU] #3 REHVH.RU | SPREAD | [FP & DT FIX]", "players": "4/32", "map": "de_mirage"},
-        {"name": "🇷🇺 [RU] Nixware HvH DM", "players": "12/32", "map": "dm_nixware"},
-        {"name": "🇷🇺 [RU] [HvH club][NS & DT FIX][Mirage]", "players": "8/32", "map": "de_mirage"},
-        {"name": "🇪🇺 [EU] CS2HVHSERVERS.COM NO AWP | NO DT", "players": "8/64", "map": "de_mirage"},
-        {"name": "🇷🇺 [RU] EX HVH | RAPID FIRE | NOSPREAD", "players": "2/32", "map": "de_mirage"},
-        {"name": "🇪🇺 CS2 HvH • Mirage • No Rapid Fire", "players": "6/24", "map": "de_mirage"},
-        {"name": "🇺🇸 HvH Premium Server | No Lag", "players": "10/20", "map": "de_inferno"},
-        {"name": "🇨🇳 [CN] Flux HvH™ | 死斗1服", "players": "1/24", "map": "de_nuke"},
-        {"name": "🇺🇸 [Eternal] 伪吾匹配1服 #2服", "players": "1/16", "map": "de_vertigo"},
-        {"name": "🇷🇺 [RU] HvH Arena | Best Servers", "players": "15/32", "map": "de_ancient"},
+        {"name": "🇺🇸 CS2HVHSERVERS.COM [SCOUT]", "ip": "162.248.95.39:27015", "players": "8/64", "map": "de_mirage", "game": "hvh"},
+        {"name": "🇺🇸 CS2HVHSERVERS.COM [SCOUT #2]", "ip": "162.248.95.40:27015", "players": "6/64", "map": "de_dust2", "game": "hvh"},
+        {"name": "🇪🇺 CS2HVHSERVERS.COM [MIRAGE]", "ip": "51.210.104.183:27015", "players": "12/64", "map": "de_mirage", "game": "hvh"},
+        {"name": "🇷🇺 REHVH.RU | SPREAD", "ip": "185.185.69.70:27015", "players": "4/32", "map": "de_mirage", "game": "hvh"},
+        {"name": "🇷🇺 Nixware HvH DM", "ip": "185.185.69.71:27015", "players": "12/32", "map": "dm_nixware", "game": "hvh"},
+        {"name": "🇪🇺 HvH • Mirage • No RF", "ip": "51.210.104.184:27015", "players": "6/24", "map": "de_mirage", "game": "hvh"},
+        {"name": "🇺🇸 HvH Premium Server", "ip": "162.248.95.41:27015", "players": "10/20", "map": "de_inferno", "game": "hvh"},
+        {"name": "🇷🇺 HvH Arena | Best", "ip": "185.185.69.72:27015", "players": "15/32", "map": "de_ancient", "game": "hvh"},
+        {"name": "🇪🇺 EU HvH #1 | 128 Tick", "ip": "51.210.104.185:27015", "players": "8/32", "map": "de_vertigo", "game": "hvh"},
+        {"name": "🇺🇸 NA HvH West Coast", "ip": "162.248.95.42:27015", "players": "5/32", "map": "de_nuke", "game": "hvh"},
     ]
 
 async def get_weather(city: str):
@@ -207,7 +172,6 @@ async def get_weather(city: str):
                 
                 data = await response.json()
                 
-                # Иконки погоды
                 condition_map = {
                     "Clear": "☀️ Ясно",
                     "Clouds": "☁️ Облачно",
@@ -267,31 +231,166 @@ def get_fallback_rates():
         "date": datetime.now().isoformat()
     }
 
+def generate_crosshair():
+    """Генерирует случайный кросхейр"""
+    styles = ['Classic', 'Classic Dynamic', 'Classic Static', 'Default', 'Default Static']
+    colors = ['Green', 'Yellow', 'Blue', 'Cyan', 'Red']
+    
+    style = random.choice(styles)
+    color = random.choice(colors)
+    size = random.randint(1, 5)
+    gap = random.randint(-3, 3)
+    thickness = random.choice([0, 0.5, 1, 1.5, 2])
+    
+    commands = [
+        f"cl_crosshair_drawoutline 1",
+        f"cl_crosshair_outlinethickness 1",
+        f"cl_crosshaircolor {colors.index(color)}",
+        f"cl_crosshairsize {size}",
+        f"cl_crosshairgap {gap}",
+        f"cl_crosshairthickness {thickness}",
+        f"cl_crosshairstyle {styles.index(style) + 2}",
+        f"cl_crosshairdot 0"
+    ]
+    
+    return {
+        "style": style,
+        "color": color,
+        "size": size,
+        "gap": gap,
+        "thickness": thickness,
+        "commands": "\n".join(commands)
+    }
+
+def generate_viewmodel():
+    """Генерирует настройки вьюмодели"""
+    presets = {
+        "Classic": {
+            "fov": 60,
+            "x": 2.5,
+            "y": 0,
+            "z": -1.5
+        },
+        "Cozy": {
+            "fov": 68,
+            "x": 2,
+            "y": 2,
+            "z": -2
+        },
+        "Desktop": {
+            "fov": 60,
+            "x": 1,
+            "y": 1,
+            "z": -1
+        },
+        "Random": {
+            "fov": random.randint(54, 68),
+            "x": round(random.uniform(0.5, 3), 1),
+            "y": round(random.uniform(-2, 2), 1),
+            "z": round(random.uniform(-3, 0), 1)
+        }
+    }
+    
+    preset_name = random.choice(list(presets.keys()))
+    vm = presets[preset_name]
+    
+    commands = [
+        f"viewmodel_fov {vm['fov']}",
+        f"viewmodel_offset_x {vm['x']}",
+        f"viewmodel_offset_y {vm['y']}",
+        f"viewmodel_offset_z {vm['z']}",
+        f"viewmodel_presetpos 0"
+    ]
+    
+    return {
+        "preset": preset_name,
+        "commands": "\n".join(commands)
+    }
+
+def generate_hvh_binds():
+    """Генерирует полезные бинды для HvH"""
+    binds = {
+        "Основные": [
+            'bind "mouse3" "+jump; -attack; -jump"  // Jump throw',
+            'bind "v" "+voicerecord"  // Voice chat',
+            'bind "c" "slot12"  // Healthshot',
+            'bind "x" "slot10"  // Zeus'
+        ],
+        "Чит команды": [
+            'bind "HOME" "exec legit.cfg"  // Legit config',
+            'bind "END" "exec rage.cfg"  // Rage config',
+            'bind "PGUP" "toggle cl_righthand 0 1"  // Switch hands',
+            'bind "PGDN" "disconnect"  // Quick DC'
+        ],
+        "Утилиты": [
+            'bind "F1" "buy vesthelm; buy vest;"  // Buy armor',
+            'bind "F2" "buy defuser;"  // Buy kit',
+            'bind "F3" "buy taser;"  // Buy zeus',
+            'bind "F4" "buy molotov; buy incgrenade;"  // Buy molly'
+        ],
+        "Коммуникация": [
+            'bind "KP_INS" "say gg"',
+            'bind "KP_END" "say nice"',
+            'bind "KP_DOWNARROW" "say nt"',
+            'bind "KP_PGDN" "say rush b"'
+        ]
+    }
+    
+    return binds
+
+def get_resolver_tips():
+    """База знаний по резолверам"""
+    tips = {
+        "Основы": [
+            "🎯 Используй Body Aim против AA (Anti-Aim)",
+            "🔄 Переключайся между Pitch Up/Down для обхода",
+            "⚡ Delay Shot помогает против Fake Lag",
+            "🎲 Safe Point на дальних дистанциях"
+        ],
+        "Против читеров": [
+            "🛡️ Baim в голову если противник крутится",
+            "⏱️ Используй Hitchance 60%+ для надежности",
+            "🔫 Магнум/Scout лучше для HvH",
+            "📊 Минимум damage: 40-50 HP"
+        ],
+        "Настройки AA": [
+            "↔️ Jitter для обхода резолверов",
+            "🔃 Fake angles 58° оптимально",
+            "⚙️ Body yaw на Static",
+            "🎭 Fake duck только на стопе"
+        ]
+    }
+    
+    return tips
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Главное меню бота"""
     user_id = update.effective_user.id
     
     if user_id in authorized_users:
         keyboard = [
+            [InlineKeyboardButton("🎮 HvH Servers", callback_data="hvh_servers")],
+            [InlineKeyboardButton("⚙️ Config Manager", callback_data="config_menu")],
+            [InlineKeyboardButton("🎯 Crosshair Gen", callback_data="crosshair_gen"),
+             InlineKeyboardButton("📷 Viewmodel Gen", callback_data="viewmodel_gen")],
+            [InlineKeyboardButton("⌨️ Bind Generator", callback_data="bind_gen")],
+            [InlineKeyboardButton("🧠 Resolver Tips", callback_data="resolver_tips")],
             [InlineKeyboardButton("🔑 Steam Code", callback_data="steam_code")],
-            [InlineKeyboardButton("🎮 CS2 HvH Servers", callback_data="hvh_servers")],
-            [InlineKeyboardButton("🌤️ Погода", callback_data="weather")],
-            [InlineKeyboardButton("💰 Курсы валют", callback_data="currency")],
-            [InlineKeyboardButton("🎲 Игра: Угадай число", callback_data="game_guess")],
-            [InlineKeyboardButton("🎰 Слот-машина", callback_data="game_slots")],
+            [InlineKeyboardButton("🌤️ Погода", callback_data="weather"),
+             InlineKeyboardButton("💰 Валюты", callback_data="currency")],
             [InlineKeyboardButton("🚪 Выход", callback_data="logout")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
-            "🤖 <b>Главное меню</b>\n\n"
-            "Выберите действие:",
+            "🤖 <b>HvH Bot - Главное меню</b>\n\n"
+            "Выберите функцию:",
             reply_markup=reply_markup,
             parse_mode='HTML'
         )
     else:
         await update.message.reply_text(
-            "👋 Привет! Я многофункциональный бот.\n\n"
+            "👋 Привет! Я бот для HvH игроков.\n\n"
             "🔐 Для доступа введите пароль:"
         )
 
@@ -347,6 +446,196 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_server_page[user_id] = max(0, user_server_page.get(user_id, 0) - 1)
         await show_servers(query, user_id)
     
+    elif query.data.startswith("connect_"):
+        server_ip = query.data.replace("connect_", "")
+        connect_url = f"steam://connect/{server_ip}"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔗 Подключиться", url=connect_url)],
+            [InlineKeyboardButton("◀️ К серверам", callback_data="hvh_servers")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🎮 <b>Подключение к серверу</b>\n\n"
+            f"📡 IP: <code>{server_ip}</code>\n\n"
+            f"Нажмите кнопку ниже для подключения через Steam",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+    
+    # Config Manager
+    elif query.data == "config_menu":
+        configs = user_configs.get(user_id, [])
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Сохранить конфиг", callback_data="config_save")],
+            [InlineKeyboardButton("📂 Мои конфиги", callback_data="config_list")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"⚙️ <b>Config Manager</b>\n\n"
+            f"Сохранено конфигов: {len(configs)}\n\n"
+            f"Здесь вы можете сохранять настройки своих читов",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+    
+    elif query.data == "config_save":
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="config_menu")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "💾 <b>Сохранение конфига</b>\n\n"
+            "Отправьте ваш конфиг в формате:\n"
+            "<code>Название конфига\n"
+            "cl_interp 0\n"
+            "rate 128000\n"
+            "...</code>",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        context.user_data['saving_config'] = True
+    
+    elif query.data == "config_list":
+        configs = user_configs.get(user_id, [])
+        
+        if not configs:
+            keyboard = [
+                [InlineKeyboardButton("➕ Создать первый", callback_data="config_save")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="config_menu")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                "📂 У вас пока нет сохраненных конфигов",
+                reply_markup=reply_markup
+            )
+        else:
+            text = "📂 <b>Ваши конфиги:</b>\n\n"
+            keyboard = []
+            
+            for i, cfg in enumerate(configs[-10:], 1):
+                text += f"{i}. {cfg['name']} ({cfg['date']})\n"
+                keyboard.append([InlineKeyboardButton(f"📄 {cfg['name']}", callback_data=f"config_view_{i-1}")])
+            
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="config_menu")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    
+    elif query.data.startswith("config_view_"):
+        idx = int(query.data.replace("config_view_", ""))
+        configs = user_configs.get(user_id, [])
+        
+        if idx < len(configs):
+            cfg = configs[idx]
+            keyboard = [
+                [InlineKeyboardButton("🗑️ Удалить", callback_data=f"config_delete_{idx}")],
+                [InlineKeyboardButton("◀️ К списку", callback_data="config_list")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                f"📄 <b>{cfg['name']}</b>\n"
+                f"📅 Создан: {cfg['date']}\n\n"
+                f"<code>{cfg['content']}</code>",
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+    
+    elif query.data.startswith("config_delete_"):
+        idx = int(query.data.replace("config_delete_", ""))
+        if user_id in user_configs and idx < len(user_configs[user_id]):
+            del user_configs[user_id][idx]
+            await query.answer("✅ Конфиг удален")
+            await query.edit_message_text("✅ Конфиг удален успешно")
+            await asyncio.sleep(1)
+            # Возврат к списку
+            keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="config_list")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text("Конфиг удален", reply_markup=reply_markup)
+    
+    # Crosshair Generator
+    elif query.data == "crosshair_gen":
+        crosshair = generate_crosshair()
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Новый кросхейр", callback_data="crosshair_gen")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"🎯 <b>Crosshair Generator</b>\n\n"
+            f"Стиль: {crosshair['style']}\n"
+            f"Цвет: {crosshair['color']}\n"
+            f"Размер: {crosshair['size']}\n"
+            f"Зазор: {crosshair['gap']}\n"
+            f"Толщина: {crosshair['thickness']}\n\n"
+            f"<b>Команды для консоли:</b>\n"
+            f"<code>{crosshair['commands']}</code>",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+    
+    # Viewmodel Generator
+    elif query.data == "viewmodel_gen":
+        viewmodel = generate_viewmodel()
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Новая вьюмодель", callback_data="viewmodel_gen")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            f"📷 <b>Viewmodel Generator</b>\n\n"
+            f"Пресет: {viewmodel['preset']}\n\n"
+            f"<b>Команды для консоли:</b>\n"
+            f"<code>{viewmodel['commands']}</code>",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+    
+    # Bind Generator
+    elif query.data == "bind_gen":
+        binds = generate_hvh_binds()
+        
+        text = "⌨️ <b>Bind Generator</b>\n\n"
+        for category, bind_list in binds.items():
+            text += f"<b>{category}:</b>\n"
+            for bind in bind_list:
+                text += f"<code>{bind}</code>\n"
+            text += "\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    
+    # Resolver Tips
+    elif query.data == "resolver_tips":
+        tips = get_resolver_tips()
+        
+        text = "🧠 <b>Resolver Tips & Tricks</b>\n\n"
+        for category, tip_list in tips.items():
+            text += f"<b>{category}:</b>\n"
+            for tip in tip_list:
+                text += f"{tip}\n"
+            text += "\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+    
     # Погода
     elif query.data == "weather":
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
@@ -384,50 +673,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
     
-    # Игра: Угадай число
-    elif query.data == "game_guess":
-        number = random.randint(1, 100)
-        context.user_data['guess_number'] = number
-        context.user_data['guess_attempts'] = 0
-        
-        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "🎲 <b>Игра: Угадай число!</b>\n\n"
-            "Я загадал число от 1 до 100.\n"
-            "Попробуй угадать! Введи число:",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-        context.user_data['playing_guess'] = True
-    
-    # Слот-машина
-    elif query.data == "game_slots":
-        symbols = ["🍒", "🍋", "🍊", "🍇", "💎", "7️⃣"]
-        slot1, slot2, slot3 = random.choice(symbols), random.choice(symbols), random.choice(symbols)
-        
-        if slot1 == slot2 == slot3:
-            result = "🎉 ДЖЕКПОТ! Все три совпали!"
-        elif slot1 == slot2 or slot2 == slot3 or slot1 == slot3:
-            result = "🎊 Два совпали! Неплохо!"
-        else:
-            result = "😢 Не повезло, попробуй ещё!"
-        
-        keyboard = [
-            [InlineKeyboardButton("🔄 Крутить ещё", callback_data="game_slots")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            f"🎰 <b>Слот-машина</b>\n\n"
-            f"[ {slot1} | {slot2} | {slot3} ]\n\n"
-            f"{result}",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-    
     # Выход
     elif query.data == "logout":
         if user_id in authorized_users:
@@ -437,52 +682,69 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Назад в меню
     elif query.data == "back_to_menu":
         keyboard = [
+            [InlineKeyboardButton("🎮 HvH Servers", callback_data="hvh_servers")],
+            [InlineKeyboardButton("⚙️ Config Manager", callback_data="config_menu")],
+            [InlineKeyboardButton("🎯 Crosshair Gen", callback_data="crosshair_gen"),
+             InlineKeyboardButton("📷 Viewmodel Gen", callback_data="viewmodel_gen")],
+            [InlineKeyboardButton("⌨️ Bind Generator", callback_data="bind_gen")],
+            [InlineKeyboardButton("🧠 Resolver Tips", callback_data="resolver_tips")],
             [InlineKeyboardButton("🔑 Steam Code", callback_data="steam_code")],
-            [InlineKeyboardButton("🎮 CS2 HvH Servers", callback_data="hvh_servers")],
-            [InlineKeyboardButton("🌤️ Погода", callback_data="weather")],
-            [InlineKeyboardButton("💰 Курсы валют", callback_data="currency")],
-            [InlineKeyboardButton("🎲 Игра: Угадай число", callback_data="game_guess")],
-            [InlineKeyboardButton("🎰 Слот-машина", callback_data="game_slots")],
+            [InlineKeyboardButton("🌤️ Погода", callback_data="weather"),
+             InlineKeyboardButton("💰 Валюты", callback_data="currency")],
             [InlineKeyboardButton("🚪 Выход", callback_data="logout")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            "🤖 <b>Главное меню</b>\n\n"
-            "Выберите действие:",
+            "🤖 <b>HvH Bot - Главное меню</b>\n\n"
+            "Выберите функцию:",
             reply_markup=reply_markup,
             parse_mode='HTML'
         )
 
 async def show_servers(query, user_id):
-    """Показывает список серверов с пагинацией"""
-    servers = await get_hvh_servers()
+    """Показывает список серверов с возможностью подключения"""
+    servers = await get_hvh_servers_from_api()
     page = user_server_page.get(user_id, 0)
-    per_page = 10
+    per_page = 5
     
     start_idx = page * per_page
     end_idx = start_idx + per_page
     page_servers = servers[start_idx:end_idx]
     
     text = "🎮 <b>CS2 HvH Servers</b>\n\n"
+    
+    keyboard = []
     for i, server in enumerate(page_servers, start=start_idx + 1):
-        text += f"{i}. {server['name']}\n"
-        text += f"   👥 {server['players']} | 🗺️ {server['map']}\n\n"
+        text += f"{i}. <b>{server['name']}</b>\n"
+        text += f"   👥 {server['players']} | 🗺️ {server['map']}\n"
+        text += f"   📡 <code>{server['ip']}</code>\n\n"
+        
+        # Кнопка подключения для каждого сервера
+        keyboard.append([InlineKeyboardButton(
+            f"🔗 Подключиться к #{i}", 
+            callback_data=f"connect_{server['ip']}"
+        )])
     
-    buttons = []
+    # Навигация
+    nav_buttons = []
     if page > 0:
-        buttons.append(InlineKeyboardButton("◀️ Назад", callback_data="servers_prev"))
+        nav_buttons.append(InlineKeyboardButton("◀️ Назад", callback_data="servers_prev"))
     if end_idx < len(servers):
-        buttons.append(InlineKeyboardButton("Ещё ▶️", callback_data="servers_next"))
+        nav_buttons.append(InlineKeyboardButton("Ещё ▶️", callback_data="servers_next"))
     
-    keyboard = [buttons] if buttons else []
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
     keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="hvh_servers")])
     keyboard.append([InlineKeyboardButton("◀️ Главное меню", callback_data="back_to_menu")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    text += f"📄 Страница {page + 1}/{(len(servers) - 1) // per_page + 1}"
+    
     await query.edit_message_text(
-        text + f"📄 Страница {page + 1}/{(len(servers) - 1) // per_page + 1}",
+        text,
         parse_mode='HTML',
         reply_markup=reply_markup
     )
@@ -498,19 +760,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             authorized_users.add(user_id)
             
             keyboard = [
+                [InlineKeyboardButton("🎮 HvH Servers", callback_data="hvh_servers")],
+                [InlineKeyboardButton("⚙️ Config Manager", callback_data="config_menu")],
+                [InlineKeyboardButton("🎯 Crosshair Gen", callback_data="crosshair_gen"),
+                 InlineKeyboardButton("📷 Viewmodel Gen", callback_data="viewmodel_gen")],
+                [InlineKeyboardButton("⌨️ Bind Generator", callback_data="bind_gen")],
+                [InlineKeyboardButton("🧠 Resolver Tips", callback_data="resolver_tips")],
                 [InlineKeyboardButton("🔑 Steam Code", callback_data="steam_code")],
-                [InlineKeyboardButton("🎮 CS2 HvH Servers", callback_data="hvh_servers")],
-                [InlineKeyboardButton("🌤️ Погода", callback_data="weather")],
-                [InlineKeyboardButton("💰 Курсы валют", callback_data="currency")],
-                [InlineKeyboardButton("🎲 Игра: Угадай число", callback_data="game_guess")],
-                [InlineKeyboardButton("🎰 Слот-машина", callback_data="game_slots")],
+                [InlineKeyboardButton("🌤️ Погода", callback_data="weather"),
+                 InlineKeyboardButton("💰 Валюты", callback_data="currency")],
                 [InlineKeyboardButton("🚪 Выход", callback_data="logout")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(
                 "✅ <b>Авторизация успешна!</b>\n\n"
-                "🤖 Главное меню:",
+                "🤖 Главное меню HvH бота:",
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
@@ -518,8 +783,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Неверный пароль. Попробуйте снова.")
         return
     
+    # Сохранение конфига
+    if context.user_data.get('saving_config'):
+        context.user_data['saving_config'] = False
+        
+        lines = message_text.strip().split('\n')
+        if len(lines) >= 2:
+            config_name = lines[0]
+            config_content = '\n'.join(lines[1:])
+            
+            if user_id not in user_configs:
+                user_configs[user_id] = []
+            
+            user_configs[user_id].append({
+                'name': config_name,
+                'content': config_content,
+                'date': datetime.now().strftime('%d.%m.%Y %H:%M')
+            })
+            
+            keyboard = [[InlineKeyboardButton("◀️ К конфигам", callback_data="config_menu")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"✅ <b>Конфиг '{config_name}' сохранен!</b>\n\n"
+                f"Всего конфигов: {len(user_configs[user_id])}",
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Неверный формат. Первая строка - название, остальное - содержимое конфига."
+            )
+    
     # Погода
-    if context.user_data.get('awaiting_city'):
+    elif context.user_data.get('awaiting_city'):
         context.user_data['awaiting_city'] = False
         
         loading_msg = await update.message.reply_text("🔍 Загружаю погоду...")
@@ -547,38 +844,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=reply_markup
             )
     
-    # Игра: Угадай число
-    elif context.user_data.get('playing_guess'):
-        try:
-            guess = int(message_text)
-            target = context.user_data['guess_number']
-            context.user_data['guess_attempts'] += 1
-            attempts = context.user_data['guess_attempts']
-            
-            if guess == target:
-                context.user_data['playing_guess'] = False
-                keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_menu")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(
-                    f"🎉 <b>ПОЗДРАВЛЯЮ!</b>\n\n"
-                    f"Вы угадали число {target} за {attempts} попыток!",
-                    parse_mode='HTML',
-                    reply_markup=reply_markup
-                )
-            elif guess < target:
-                await update.message.reply_text(
-                    f"📈 Моё число БОЛЬШЕ {guess}\n"
-                    f"Попытка {attempts}. Попробуй ещё!"
-                )
-            else:
-                await update.message.reply_text(
-                    f"📉 Моё число МЕНЬШЕ {guess}\n"
-                    f"Попытка {attempts}. Попробуй ещё!"
-                )
-        except ValueError:
-            await update.message.reply_text("⚠️ Введите корректное число от 1 до 100!")
-    
     else:
         await update.message.reply_text(
             "Используйте /start для открытия главного меню."
@@ -591,7 +856,7 @@ def main():
         return
     
     if not WEATHER_API_KEY:
-        print("⚠️ Предупреждение: WEATHER_API_KEY не задан, погода будет показывать ошибку")
+        print("⚠️ Предупреждение: WEATHER_API_KEY не задан")
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -599,9 +864,10 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🤖 Бот запущен!")
+    print("🤖 HvH Bot запущен!")
     print(f"📧 Email: {EMAIL_ADDRESS}")
-    print(f"🌤️ Weather API: {'✅ Настроен' if WEATHER_API_KEY else '❌ Не настроен'}")
+    print(f"🌤️ Weather API: {'✅' if WEATHER_API_KEY else '❌'}")
+    print(f"🎮 Steam API: {'✅' if STEAM_API_KEY else '❌'}")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
