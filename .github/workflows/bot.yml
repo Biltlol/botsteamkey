@@ -46,7 +46,7 @@ jobs:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        WEATHER_API_KEY: ${{ secrets.WEATHER_TOKEN }}
+        WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
       run: |
         echo "🤖 Бот запускается..."
         python bot.py
