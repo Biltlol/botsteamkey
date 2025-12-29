@@ -1,0 +1,39 @@
+name: Steam Code Bot
+
+on:
+  schedule:
+    # Запуск каждые 5 часов автоматически
+    - cron: '0 */5 * * *'
+  
+  # Ручной запуск (если захотите перезапустить)
+  workflow_dispatch:
+  
+  # Запуск при push (для тестирования)
+  push:
+    branches: [ main ]
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 290  # 4 часа 50 минут (с запасом)
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Run bot
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+      run: |
+        python bot.py
