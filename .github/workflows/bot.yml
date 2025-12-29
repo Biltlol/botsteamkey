@@ -1,18 +1,18 @@
 name: Steam Code Bot 24/7
 
 on:
-  # Запуск каждые 5 часов
+  # Запуск каждые 5 часов автоматически
   schedule:
     - cron: '0 */5 * * *'
   
-  # Ручной запуск
+  # Ручной запуск (кнопка в GitHub)
   workflow_dispatch:
   
-  # Запуск при push
+  # Запуск при push (для тестирования)
   push:
     branches: [ main ]
 
-# Важно! Только один бот одновременно
+# Только один бот одновременно
 concurrency:
   group: steam-bot
   cancel-in-progress: true
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # 5 часов 50 минут (с запасом)
+    timeout-minutes: 350  # 5 часов 50 минут
     
     steps:
     - name: Checkout code
