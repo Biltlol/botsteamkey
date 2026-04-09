@@ -1,18 +1,12 @@
 name: Steam Code Bot 24/7
 
 on:
-  # Запуск каждые 5 часов автоматически
   schedule:
     - cron: '0 */5 * * *'
-  
-  # Ручной запуск (кнопка в GitHub)
   workflow_dispatch:
-  
-  # Запуск при push (для тестирования)
   push:
     branches: [ main ]
 
-# Только один бот одновременно
 concurrency:
   group: steam-bot
   cancel-in-progress: true
@@ -20,7 +14,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # 5 часов 50 минут
+    timeout-minutes: 350
     
     steps:
     - name: Checkout code
@@ -39,7 +33,21 @@ jobs:
     
     - name: Install dependencies
       run: |
+        echo "📦 Установка зависимостей..."
         pip install -r requirements.txt
+        echo "✅ Зависимости установлены"
+    
+    - name: Verify secrets
+      run: |
+        echo "🔍 Проверка переменных окружения..."
+        if [ -z "$BOT_TOKEN" ]; then echo "❌ BOT_TOKEN не задан!"; exit 1; fi
+        if [ -z "$EMAIL_ADDRESS" ]; then echo "❌ EMAIL_ADDRESS не задан!"; exit 1; fi
+        if [ -z "$EMAIL_PASSWORD" ]; then echo "❌ EMAIL_PASSWORD не задан!"; exit 1; fi
+        echo "✅ Все переменные заданы"
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
     
     - name: Run bot
       env:
@@ -49,4 +57,17 @@ jobs:
         WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
       run: |
         echo "🤖 Бот запускается..."
-        python bot.py
+        python -u bot.py 2>&1 | tee bot.log &
+        BOT_PID=$!
+        echo "📋 PID бота: $BOT_PID"
+        
+        # Ждём 30 секунд и проверяем что бот запустился
+        sleep 30
+        if ps -p $BOT_PID > /dev/null; then
+          echo "✅ Бот успешно запущен и работает!"
+          wait $BOT_PID
+        else
+          echo "❌ Бот упал при запуске!"
+          cat bot.log
+          exit 1
+        fi
