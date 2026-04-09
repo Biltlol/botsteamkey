@@ -1,0 +1,52 @@
+name: Steam Code Bot 24/7
+
+on:
+  # Запуск каждые 5 часов автоматически
+  schedule:
+    - cron: '0 */5 * * *'
+  
+  # Ручной запуск (кнопка в GitHub)
+  workflow_dispatch:
+  
+  # Запуск при push (для тестирования)
+  push:
+    branches: [ main ]
+
+# Только один бот одновременно
+concurrency:
+  group: steam-bot
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # 5 часов 50 минут
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Run bot
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+      run: |
+        echo "🤖 Бот запускается..."
+        python bot.py
